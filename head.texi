@@ -1,0 +1,17 @@
+@setfilename simplewiki
+@settitle SimpleWiki
+
+@documentlanguage en
+@documentencoding UTF-8
+
+@dircategory Wiki
+@direntry
+* Simple:     (simplewiki).      Simple English Wiki.
+@end direntry
+
+@node Top
+@top Simple Wiki
+
+Testing.
+
+
