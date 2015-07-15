@@ -19,17 +19,18 @@ executable infowiki
   main-is:             Main.hs
   -- other-modules:       
   -- other-extensions:    
-  build-depends:       base >=4.7 && <4.8
-                     , bytestring
-                     , data-default
-                     , filepath >= 1.3.0.2
-                     , hexpat
-                     , mtl >= 2.1.3.1
-                     , network-uri >= 2.6.0.3
-                     
-                     , pandoc-types >= 1.12.4.4
-                     , pandoc == 1.15.0.4
-                     , parsec >= 3.1.5
-                     , utf8-string
+  build-depends:       
+                         base >=4.7 && <4.8
+                       , bytestring
+                       , data-default
+                       , filepath >= 1.3.0.2
+                       , hexpat
+                       , mtl >= 2.1.3.1
+                       , network-uri >= 2.6.0.3
+                       , pandoc == 1.15.0.4
+                       , pandoc-types >= 1.12.4.4
+                       , parsec >= 3.1.5
+                       , text >= 1.1.0.0
+                       , utf8-string
   -- hs-source-dirs:      
   default-language:    Haskell2010
