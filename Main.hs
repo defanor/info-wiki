@@ -6,27 +6,28 @@ import Text.XML.Expat.SAX
 import Text.XML.Expat.Proc
 import System.Environment (getArgs)
 import qualified Data.List as L
--- import Article
 import Data.Text as T
 
 import Text.Pandoc.Readers.MediaWiki
 import Data.Default
 import Text.Pandoc.Writers.Texinfo
 import Text.Pandoc.Definition
+import Control.Monad.State.Lazy
+
+import Control.Applicative
+import Data.Text.IO as TIO
 
 replace' :: [(Text, Text)] -> Text -> Text
 replace' ((p, w):xs) t = replace' xs (replace p w t)
 replace' [] t = t
-
-escape :: Text -> Text
-escape = id -- replace' [("@", "@@"), ("{", "@{"), ("}", "@}")]
 
 escapeNode :: Text -> Text
 escapeNode = replace' [(":", "colon"),
                        (",", "comma"),
                        ("{", "curly-l"),
                        ("}", "curly-r"),
-                       ("*", "asterisk")
+                       ("*", "asterisk"),
+                       ("_", " ")
                       ]
 
 main :: IO ()
@@ -34,18 +35,20 @@ main = do
     args <- getArgs
     contents <- BSL.readFile (L.head args)
     let p = parse defaultParseOptions contents :: [SAXEvent Text Text]
-        nodes = L.take (read $ args !! 1) $ infoNodes INSNone p
+        nodes = (if (L.length args >= 2)
+                 then (L.take (read $ args !! 1))
+                 else id) $ infoNodes INSNone p
         top = "\US\nFile: simplewiki,  Node: Top,  Up: (dir)\n\nTop\n***\n\nHello there.\n\n"
         tl = L.length top
-    writeFile "simplewiki-0" top
-    processNodes (2 ^ 20) "simplewiki" (PS tl tl 0 1 "Node: Top\DEL0\n" "simplewiki-0: 0\n") nodes
+    Prelude.writeFile "simplewiki-0" top
+    processNodes (2 ^ 24) "simplewiki" (PS tl tl 0 1 ["Node: Top\DEL0\n"] ["simplewiki-0: 0\n"]) nodes
 
 data PState = PS { bytes :: Int
                  , fileSize :: Int
                  , files :: Int
                  , nodes :: Int
-                 , tagTable :: Text
-                 , indirect :: Text
+                 , tagTable :: [Text]
+                 , indirect :: [Text]
                  } deriving (Show)
 
 processNodes :: Int -> Text -> PState -> [InfoNode] -> IO ()
@@ -53,73 +56,102 @@ processNodes maxFileSize fileName (PS b fs f n tt ind) (x@(IN t txt):xs) =
   let node = printNode fileName x
       nodeLen = T.length node in
    if nodeLen > maxFileSize
-   then putStrLn $ "The node is too big: " ++ unpack t
+   then Prelude.putStrLn $ "The node is too big: " ++ unpack t
    else
-     let tt' = T.append tt (T.concat ["Node: ", escapeNode t, "\DEL", pack (show b), "\n"])
+     let tt' = T.concat ["Node: ", escapeNode t, "\DEL", pack (show b), "\n"] : tt
          b' = b + nodeLen
      in
       if fs + nodeLen <= maxFileSize
       then do
-        appendFile (unpack fileName ++ "-" ++ show f) (unpack node)
+        TIO.appendFile (unpack fileName ++ "-" ++ show f) node
         processNodes maxFileSize fileName (PS b' (fs + nodeLen) f (n + 1) tt' ind) xs
       else let fn' = T.concat [fileName, "-", pack (show (f + 1))]
-               ind' = T.append ind (T.concat [fn', ": ", pack (show b), "\n"]) in do
-        writeFile (unpack fn') (unpack node)
+               ind' = T.concat [fn', ": ", pack (show b), "\n"] : ind in do
+        TIO.writeFile (unpack fn') node
         processNodes maxFileSize fileName (PS b' nodeLen (f + 1) (n + 1) tt' ind') xs
-processNodes _ fileName (PS _ _ _ _ tt ind) [] =
-  writeFile (unpack fileName) (unpack $ T.concat
-                               ["INFO-DIR-SECTION Wiki\nSTART-INFO-DIR-ENTRY\n",
-                                "* SimpleWiki: (simplewiki).             Simple wiki.\n",
-                                "END-INFO-DIR-ENTRY\n\n", "\US\nIndirect:\n", ind,
-                                "\US\nTag Table:\n(Indirect)\n", tt, "\US\nEnd Tag Table\n"])
-
--- appendFile "menu.texi" . unpack
+processNodes _ fileName (PS _ _ _ _ tt ind) [] = let fn = unpack fileName
+                                                     app = TIO.appendFile fn in do
+  TIO.writeFile fn $ T.concat
+    ["INFO-DIR-SECTION Wiki\nSTART-INFO-DIR-ENTRY\n",
+     "* SimpleWiki: (simplewiki).             Simple wiki.\n",
+     "END-INFO-DIR-ENTRY\n\n", "\US\nIndirect:\n"]
+  app $ T.concat $ L.reverse ind
+  app "\US\nTag Table:\n(Indirect)\n"
+  app $ T.concat $ L.reverse tt
+  app "\US\nEnd Tag Table\n"
 
 printNode :: Text -> InfoNode -> Text
 printNode fn (IN t txt) = T.concat ["\n\US\nFile: ", fn,
-                                    ",  Node: ", t,
+                                    ",  Node: ", escapeNode t,
                                     ",  Up: Top\n\n",
                                     t, "\n", T.replicate (T.length t) "*", "\n\n",
-                                    translate txt]
+                                    fst $ runState (translate txt) []]
 
-
-translate :: Text -> Text
+translate :: Text -> State [[Block]] Text
 translate s = case readMediaWiki def (unpack s) of
-  Left err -> "parse error"
-  Right (Pandoc _ l) -> printBlocks 0 l
+  Left err -> return "parse error"
+  Right (Pandoc _ l) -> do
+    b <- printBlocks 0 l
+    n <- printNotes
+    return $ T.append b n
 
-padded :: Int -> Text -> Text
-padded n = T.unlines . L.map (T.append $ T.replicate n " ") . T.lines
+adjustWidth :: Int -> Text -> [Text]
+adjustWidth max t = adjustWidth' (T.splitOn " " t) ""
+   where
+    adjustWidth' :: [Text] -> Text -> [Text]
+    adjustWidth' (x:xs) acc
+      -- accumulate
+      | T.length x + T.length acc + 1 <= max =
+        if acc == ""
+        then adjustWidth' xs x
+        else adjustWidth' xs (T.concat [acc, " ", x])
+      -- deal with long words
+      | T.length x > max =
+        if acc == ""
+        then x : adjustWidth' xs ""
+        else acc : adjustWidth' (x:xs) ""
+      -- flush
+      | otherwise = acc : adjustWidth' xs x
+    adjustWidth' [] acc = [acc]
 
--- A version that prepends something to the first line
-padded' :: Int -> Text -> Text -> Text
-padded' n p t = case T.lines t of
-  (x:xs) -> T.concat [p, T.replicate (n - T.length p) " ", x, "\n", padded n (T.unlines xs)]
-  [] -> ""
+padded :: Int -> Text -> State [[Block]] Text
+padded n = return . T.unlines . L.concatMap padLine . T.lines
+  where
+    padLine = L.map (T.append $ T.replicate n " ") . adjustWidth (80 - n)
 
+printNotes :: State [[Block]] Text
+printNotes = do
+  blocks <- get
+  if L.length blocks > 0
+    then T.append "\n\n   ---------- Footnotes ----------\n\n" <$>
+         T.intercalate "\n\n" <$>
+         (mapM (printBlocks 3) (L.map addNumber (L.zip [1..] blocks)))
+    else return ""
+  where addNumber (n, b) = Plain [Str $ "(" ++ show n ++ ")"] : b
+          
 
-printBlocks :: Int -> [Block] -> Text
-printBlocks pad l = intercalate "\n\n" $ L.map (printBlock pad) l
+printBlocks :: Int -> [Block] -> State [[Block]] Text
+printBlocks pad l = intercalate "\n\n" <$> mapM (printBlock pad) l
 
-printBlock :: Int -> Block -> Text
+printBlock :: Int -> Block -> State [[Block]] Text
 printBlock pad (CodeBlock attr code) = padded pad $ pack code
-printBlock pad (Plain il) = padded pad $ printInlines il
-printBlock pad (Para il) = padded pad $ T.append "  " $ printInlines il
-printBlock pad (RawBlock fmt str) = padded pad $ escape $ pack str
-printBlock pad (BlockQuote blocks) = padded (pad + 2) $ printBlocks pad blocks
+printBlock pad (Plain il) = printInlines il >>= padded pad
+printBlock pad (Para il) = T.append "  " <$> printInlines il >>= padded pad
+printBlock pad (RawBlock fmt str) = padded pad $ pack str
+printBlock pad (BlockQuote blocks) = printBlocks (pad + 2) blocks
 printBlock pad (OrderedList attr blocks) = printOrderedList (pad + pad') 1 blocks
   where pad' = (L.length $ show (1 + L.length blocks)) + 2
 printBlock pad (BulletList blocks) = printBulletList pad blocks
-printBlock pad (DefinitionList ib) = T.intercalate "\n\n" $ L.map (printDef pad) ib
-printBlock pad (Header level attr il) = printHeading (level - 1) $ printInlines il
-printBlock pad HorizontalRule = T.replicate 80 "-"
-printBlock pad (Table caption alignments widths headers cells) = "todo, table"
+printBlock pad (DefinitionList ib) = T.intercalate "\n\n" <$> mapM (printDef pad) ib
+printBlock pad (Header level attr il) = printInlines il >>= printHeading (level - 1)
+printBlock pad HorizontalRule = return $ T.replicate 80 "-"
+printBlock pad (Table caption alignments widths headers cells) = return "todo, table"
 printBlock pad (Div attr blocks) = printBlocks pad blocks
-printBlock pad Null = ""
+printBlock pad Null = return ""
 
 
-printHeading :: Int -> Text -> Text
-printHeading n s = T.concat [s, "\n", T.replicate (T.length s) hChar]
+printHeading :: Int -> Text -> State [[Block]] Text
+printHeading n s = return $ T.concat [s, "\n", T.replicate (T.length s) hChar]
   where hChar = case n of
                  0 -> "*"
                  1 -> "="
@@ -128,48 +160,60 @@ printHeading n s = T.concat [s, "\n", T.replicate (T.length s) hChar]
 
 -- It is assumed that padding includes the padding required for the
 -- widest number
-printOrderedList :: Int -> Int -> [[Block]] -> Text
-printOrderedList pad n (x:xs) = T.concat [pnum,
-                                          T.drop pad $ printBlocks pad x,
-                                          printOrderedList pad (n + 1) xs]
+printOrderedList :: Int -> Int -> [[Block]] -> State [[Block]] Text
+printOrderedList pad n (x:xs) = do
+  b <- printBlocks pad x
+  ol <- printOrderedList pad (n + 1) xs
+  return $ T.concat [pnum, T.drop pad b, ol]
   where
     tnum = T.pack $ show n ++ ". "
     pnum = T.append (T.replicate (pad - T.length tnum) " ") tnum
-printOrderedList _ _ [] = ""
+printOrderedList _ _ [] = return ""
 
-printBulletList :: Int -> [[Block]] -> Text
-printBulletList pad (x:xs) = T.concat [T.replicate pad " ", "- ",
-                                       T.drop (pad + 2) $ printBlocks (pad + 2) x,
-                                       printBulletList pad xs]
-printBulletList pad [] = ""
+printBulletList :: Int -> [[Block]] -> State [[Block]] Text
+printBulletList pad (x:xs) = do
+  b <- printBlocks (pad + 2) x
+  bl <- printBulletList pad xs
+  return $ T.concat [T.replicate pad " ", "- ", T.drop (pad + 2) b, bl]
+printBulletList pad [] = return ""
 
-printDef :: Int -> ([Inline], [[Block]]) -> Text
-printDef pad (inl, blocks) = T.concat [padded pad (printInlines inl),
-                                       printBulletList (pad + 2) blocks]
-                             
-printInlines :: [Inline] -> Text
-printInlines = T.concat . L.map printInline
+printDef :: Int -> ([Inline], [[Block]]) -> State [[Block]] Text
+printDef pad ([], blocks) = printBulletList (pad + 2) blocks
+printDef pad (inl, blocks) = do
+  il <- printInlines inl >>= padded pad
+  bl <- printBulletList (pad + 2) blocks
+  return $ T.concat [il, "\n", bl]
+printInlines :: [Inline] -> State [[Block]] Text
+printInlines = (<$>) T.concat . mapM printInline
 
-printInline :: Inline -> Text
-printInline (Str s) = pack s
-printInline (Emph inl) = T.concat ["_", printInlines inl, "_"]
-printInline (Strong inl) = T.concat ["*", printInlines inl, "*"]
-printInline (Strikeout inl) = T.concat ["-", printInlines inl, "-"]
+printInline :: Inline -> State [[Block]] Text
+printInline (Str s) = return $ pack s
+printInline (Emph inl) = (\x -> T.concat ["_", x, "_"]) <$> printInlines inl
+printInline (Strong inl) = (\x -> T.concat ["*", x, "*"]) <$> printInlines inl
+printInline (Strikeout inl) = (\x -> T.concat ["-", x, "-"]) <$> printInlines inl
 printInline (Superscript inl) = printInlines inl
 printInline (Subscript inl) = printInlines inl
 printInline (SmallCaps inl) = printInlines inl
-printInline (Quoted t inl) = T.concat ["‘", printInlines inl, "’"]
-printInline (Cite t inl) = T.concat ["‘", printInlines inl, "’"]
-printInline (Code attr inl) = T.concat ["`", pack inl, "`"]
-printInline Space = " "
-printInline LineBreak = "\n"
-printInline (Math mt s) = T.concat ["$", escape (pack s), "$"]
-printInline (RawInline fmt s) = escape $ pack s
+printInline (Quoted t inl) = (\x -> T.concat ["‘", x, "’"]) <$> printInlines inl
+printInline (Cite t inl) = (\x -> T.concat ["‘", x, "’"]) <$> printInlines inl
+printInline (Code attr inl) = return $ T.concat ["`", pack inl, "`"]
+printInline Space = return " "
+printInline LineBreak = return "\n"
+printInline (Math mt s) = return $ T.concat ["$", pack s, "$"]
+printInline (RawInline fmt s) = return $ pack s
 printInline (Link inl (l, "wikilink")) =
-  T.concat [printInlines inl, " (*note ", escapeNode $ pack l, "::)"]
-printInline l@(Link inl other) = pack $ show l
-printInline (Image alt t) = T.concat ["[image: ", printInlines alt, " ", pack $ show t, "]"]
-printInline (Note blocks) = T.concat ["note{", printBlocks 0 blocks, "}"]
+  (\x -> T.concat [x, " (*note ", escapeNode $ pack l, "::)"]) <$> printInlines inl
+printInline (Link inl (url, "")) = do
+  il <- printInlines inl
+  return $ case il of
+   "" -> T.concat ["<", pack url, ">"]
+   i -> T.concat [i, " (", pack url, ")"]
+printInline (Image alt t) =
+  (\x -> T.concat ["[image: ", x, " ", pack $ show t, "]"]) <$> printInlines alt
+printInline (Note blocks) = do
+  b <- get
+  put $ b ++ [blocks]
+  return $ T.concat ["(", (pack . show $ L.length b + 1), ")"]
 printInline (Span attr inl) = printInlines inl
 
 data InfoNode = IN Text Text
