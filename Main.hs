@@ -86,38 +86,67 @@ printNode fn (IN t txt) = T.concat ["\n\US\nFile: ", fn,
 translate :: Text -> Text
 translate s = case readMediaWiki def (unpack s) of
   Left err -> "parse error"
-  Right (Pandoc _ l) -> printBlocks l
+  Right (Pandoc _ l) -> printBlocks 0 l
 
-adjustWidth :: Int -> Text -> Text
-adjustWidth max t = intercalate "\n" $ adjustWidth' (T.words t) ""
+padded :: Int -> Text -> Text
+padded n = T.unlines . L.map (T.append $ T.replicate n " ") . T.lines
+
+-- A version that prepends something to the first line
+padded' :: Int -> Text -> Text -> Text
+padded' n p t = case T.lines t of
+  (x:xs) -> T.concat [p, T.replicate (n - T.length p) " ", x, "\n", padded n (T.unlines xs)]
+  [] -> ""
+
+
+printBlocks :: Int -> [Block] -> Text
+printBlocks pad l = intercalate "\n\n" $ L.map (printBlock pad) l
+
+printBlock :: Int -> Block -> Text
+printBlock pad (CodeBlock attr code) = padded pad $ pack code
+printBlock pad (Plain il) = padded pad $ printInlines il
+printBlock pad (Para il) = padded pad $ T.append "  " $ printInlines il
+printBlock pad (RawBlock fmt str) = padded pad $ escape $ pack str
+printBlock pad (BlockQuote blocks) = padded (pad + 2) $ printBlocks pad blocks
+printBlock pad (OrderedList attr blocks) = printOrderedList (pad + pad') 1 blocks
+  where pad' = (L.length $ show (1 + L.length blocks)) + 2
+printBlock pad (BulletList blocks) = printBulletList pad blocks
+printBlock pad (DefinitionList ib) = T.intercalate "\n\n" $ L.map (printDef pad) ib
+printBlock pad (Header level attr il) = printHeading (level - 1) $ printInlines il
+printBlock pad HorizontalRule = T.replicate 80 "-"
+printBlock pad (Table caption alignments widths headers cells) = "todo, table"
+printBlock pad (Div attr blocks) = printBlocks pad blocks
+printBlock pad Null = ""
+
+
+printHeading :: Int -> Text -> Text
+printHeading n s = T.concat [s, "\n", T.replicate (T.length s) hChar]
+  where hChar = case n of
+                 0 -> "*"
+                 1 -> "="
+                 2 -> "-"
+                 _ -> "."
+
+-- It is assumed that padding includes the padding required for the
+-- widest number
+printOrderedList :: Int -> Int -> [[Block]] -> Text
+printOrderedList pad n (x:xs) = T.concat [pnum,
+                                          T.drop pad $ printBlocks pad x,
+                                          printOrderedList pad (n + 1) xs]
   where
-    adjustWidth' :: [Text] -> Text -> [Text]
-    adjustWidth' (x:xs) acc
-      | T.length x + T.length acc + 1 <= max =
-        if acc == ""
-        then adjustWidth' xs x
-        else adjustWidth' xs (T.concat [acc, " ", x])
-      | T.length x > max =
-        if acc == ""
-        then x : adjustWidth' xs ""
-        else acc : adjustWidth' (x:xs) ""
-      | otherwise = acc : adjustWidth' xs x
-    adjustWidth' [] acc = [acc]
+    tnum = T.pack $ show n ++ ". "
+    pnum = T.append (T.replicate (pad - T.length tnum) " ") tnum
+printOrderedList _ _ [] = ""
 
-printBlocks :: [Block] -> Text
-printBlocks l = intercalate "\n\n" $ L.map printBlock l
+printBulletList :: Int -> [[Block]] -> Text
+printBulletList pad (x:xs) = T.concat [T.replicate pad " ", "- ",
+                                       T.drop (pad + 2) $ printBlocks (pad + 2) x,
+                                       printBulletList pad xs]
+printBulletList pad [] = ""
 
-printBlock :: Block -> Text
-printBlock (CodeBlock attr code) = pack code
-printBlock other = adjustWidth 80 $ printBlock' other
-  where
-    printBlock' :: Block -> Text
-    printBlock' (Plain il) = printInlines il
-    printBlock' (Para il) = T.append "  " $ printInlines il
-    printBlock' (RawBlock fmt str) = escape $ pack str
-    printBlock' (BlockQuote blocks) = printBlocks blocks
-    printBlock' other = pack $ show other
-
+printDef :: Int -> ([Inline], [[Block]]) -> Text
+printDef pad (inl, blocks) = T.concat [padded pad (printInlines inl),
+                                       printBulletList (pad + 2) blocks]
+                             
 printInlines :: [Inline] -> Text
 printInlines = T.concat . L.map printInline
 
@@ -138,7 +167,10 @@ printInline (Math mt s) = T.concat ["$", escape (pack s), "$"]
 printInline (RawInline fmt s) = escape $ pack s
 printInline (Link inl (l, "wikilink")) =
   T.concat [printInlines inl, " (*note ", escapeNode $ pack l, "::)"]
-printInline other = pack $ show other
+printInline l@(Link inl other) = pack $ show l
+printInline (Image alt t) = T.concat ["[image: ", printInlines alt, " ", pack $ show t, "]"]
+printInline (Note blocks) = T.concat ["note{", printBlocks 0 blocks, "}"]
+printInline (Span attr inl) = printInlines inl
 
 data InfoNode = IN Text Text
 
